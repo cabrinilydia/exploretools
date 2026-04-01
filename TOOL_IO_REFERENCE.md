@@ -137,11 +137,7 @@ PRIMER_RIGHT_0_TM=59.971
 
 ---
 
-## STAGE 3a — Pre-filter: Tm + Structure
-
----
-
-### 3a) primer3-py (filter pass)
+### 2b) primer3-py (filter pass)
 
 **Purpose:** Fast cheap filters — reject bad Tm, hairpins, homodimers from all 20,000 raw primers.
 
@@ -205,11 +201,7 @@ pair1 GAAGTGGGTTTTGTCGTGCC CGCCAACAATAAGCCATCCG 50 500
 
 ---
 
-## STAGE 3b — Thermodynamics on Filtered Primers
-
----
-
-### 7c) primer3-py (multi-genome)
+### 2c) primer3-py (multi-genome)
 
 **Purpose:** Direct Python API primer design from all 5 genomes independently.
 
@@ -231,41 +223,13 @@ MN938384.1   50              0
 MN975262.1   50              0   ← last genome
 ```
 
----
-
-## Summary Table
-
-| Tool | Stage | Input | Key Output | Role |
-|------|-------|-------|------------|------|
-| MAFFT | 1 | `test5.fasta` | `mafft_aligned.fasta` | MSA |
-| Clustal Omega | 1 | `test5.fasta` | `clustalo_aligned.fasta` | MSA (alt) |
-| primer3_core | 2 | genome + params | `primer3_output_{left,right}.txt` | 20k raw primers |
-| primer3-py | 3a | 20k raw primers | `primers_filtered.{tsv,fasta}` | Tm+structure filter |
-| MELTING | 3b | 50 primer seqs | `melting_results.txt` | ΔH/ΔS/Tm (NN model) |
-| oligo-melting | 3b | 1,061 filtered primers | `oligomelting_results.txt` | Tm at 1M + 50mM Na⁺ |
-| blastn | 4a | filtered primers vs 5 genomes | `blast_results.txt` | Off-target hits |
-| MFEprimer | 4a | filtered primers | `mfeprimer_{spec,dimer,hairpin}.txt` | Specificity + structure |
-| primerdiffer | 4a | genome pairs | `primerdiffer_all/` | Discriminatory primers |
-| seqkit | 4a | filtered FASTA | `seqkit_primer_stats.txt` | FASTA stats |
-| bowtie2 | 4a | filtered primers vs 5 genomes | `bowtie2_primers.sam` | Alignment specificity |
-| isPcr | 4b | top 100 pairs | `ispcr_output.fasta` | Exact amplicons |
-| ipcress | 4b | top 100 pairs | `ipcress_output.txt` | Mismatch-tolerant PCR |
-| primersearch | 4b | top 100 pairs | `primersearch_output.txt` | EMBOSS PCR (10% mm) |
-| tntblast | 4b | 1 pair | `tntblast_output.txt` | Thermodynamic PCR sim |
-| PrimalScheme3 | 5 | MSA | `ps3_out/primer.bed` + `amplicon.bed` | Tiling scheme |
-| varvamp | 5 | MSA | `varvamp_out/primers.tsv` + BED | Variation-aware tiling |
-| olivar | 5 | 3kb FASTA | `olivar_out/sars2_tiling.csv` + BED | SADDLE tiling |
-| PUPpy | 6 | CDS target + nontarget dirs | `ResultDB.tsv` → `UniquePrimerTable.tsv` | Taxon-specific |
-| NGS-PrimerPlex | 6 | BED targets + genome | `*_combination_1.fa` | Multiplex panel |
-| DegePrime | 7 | MSA | `degeprime_output.tsv` | Degenerate primers |
-| PrimerServer2 | 7 | bracket-format FASTA | TSV primer pairs per region | Target-focused design |
-| primer3-py (multi) | 7 | `test5.fasta` | `primer3py_output.txt` | Per-genome design |
+## STAGE 3 — Thermodynamics on Filtered Primers
 
 ---
 
 ## FILTER & SCORE
 
-### 3b-i) MELTING (Java)
+### 3a) MELTING (Java)
 
 **Purpose:** Nearest-neighbour thermodynamic Tm with Na⁺ salt correction.
 
@@ -290,7 +254,7 @@ Melting temperature : 52.91 degrees C.
 
 ---
 
-### 3b-ii) oligo-melting
+### 3b) oligo-melting
 
 **Purpose:** Python-based Tm calculation on ALL filtered primers with salt correction.
 
@@ -389,7 +353,7 @@ primer_3  CAAGCCTCTTCTCGTTCCTCAT  22  50.00  60.62  -23.20
 
 ---
 
-### 4a-iv) seqkit
+### 4a-iii) seqkit
 
 **Purpose:** Quick statistics on the filtered primer FASTA.
 
@@ -408,7 +372,7 @@ primers_filtered.fasta             FASTA   DNA    1,061    22,063      18     20
 
 ---
 
-### 4a-v) bowtie2 + samtools
+### 4a-iv) bowtie2 + samtools
 
 **Purpose:** Alignment-based specificity — maps all filtered primers against all 5 genomes.
 
@@ -555,13 +519,13 @@ forward primer %GC = 55
 
 ---
 
-## STAGE 5 — Tiling Schemes
+## STAGE 5 — Optimize / Panel Selection
 
 ---
 
 ## OPTIMIZE / PANEL SELECTION
 
-### 5c) olivar
+### 5a) olivar
 
 **Purpose:** SADDLE-optimization tiling scheme — risk-minimised primers (first 3,000 bp demo).
 
@@ -599,11 +563,7 @@ input-seq-1  356  375  sars2_tiling_1_RIGHT  1  -  TCCTCCACGGAGTCTCCAAA
 
 ---
 
-## STAGE 6 — Taxon-specific + Multiplex
-
----
-
-### 6b) NGS-PrimerPlex
+### 5b) NGS-PrimerPlex
 
 **Purpose:** Design multiplexed primer panel for 2 SARS-CoV-2 target regions (amplicon-based NGS).
 
@@ -636,13 +596,13 @@ GGAGGAGGTCTTATCAGAGG
 
 ---
 
-## STAGE 7 — Other Independent Generators
+## STAGE 6 — Specialized Workflows
 
 ---
 
 ## SPECIALIZED WORKFLOWS
 
-### 5a) PrimalScheme3
+### 6a) PrimalScheme3
 
 **Purpose:** MSA-aware amplicon tiling scheme across the full genome.
 
@@ -683,7 +643,7 @@ MN908947.3  822  1285 aeaddc3a_3  1
 
 ---
 
-### 5b) varvamp
+### 6b) varvamp
 
 **Purpose:** Variation-aware tiling — designs primers minimising ambiguous positions.
 
@@ -713,7 +673,7 @@ varVAMP_2     1088  varVAMP_2_LEFT       1     2395   2416  CACGCACTCAAAGGGATTGT
 
 ---
 
-### 6a) PUPpy
+### 6c) PUPpy
 
 **Purpose:** Design primers uniquely specific to E. coli K-12 (not hitting Salmonella).
 
@@ -755,7 +715,7 @@ EcoliK12  cds_NP_416485.5_1966   ...  0.079         76             GAACTTCACCAGC
 
 ---
 
-### 7a) DegePrime
+### 6d) DegePrime
 
 **Purpose:** Sliding-window degenerate primer design from MSA — maximises coverage across variants.
 
@@ -791,7 +751,7 @@ Pos  NumberSpanning  UniqueMers  Entropy  PrimerDeg  PrimerSeq             Numbe
 
 ---
 
-### 7b) PrimerServer2 (primertool)
+### 6e) PrimerServer2 (primertool)
 
 **Purpose:** Target-focused primer design for 5 SARS-CoV-2 diagnostic regions with BLAST-based specificity checking.
 
@@ -830,10 +790,12 @@ primertool design ps2_sars2_targets.fasta test5.fasta \
 
 **Output sample (`primerserver2_final_results.tsv`):**
 ```
+Sample omitted in current draft.
+```
 
 ---
 
-### 4a-iii) primerdiffer
+### 6f) primerdiffer
 
 **Purpose:** Find primers that discriminate between genome pairs (diagnostic primer design).
 
@@ -857,10 +819,6 @@ TTTGTCACGCACTTTCCTGT
 ```
 
 **Note:** Runs all 10 combinations (C(5,2)) of 5 genomes
-
----
-
----
 
 ---
 
