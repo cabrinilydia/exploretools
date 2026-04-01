@@ -1,4 +1,6 @@
 #!/bin/bash
+# Get directory where this script lives
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ============================================================
 # PRIMER DESIGN PIPELINE — FULL SETUP FROM SCRATCH
 # Run on fresh Linux machine with Miniforge installed
@@ -6,7 +8,7 @@
 # Time: ~20-30 minutes
 # ============================================================
 
-set -e
+set +e
 
 echo "========================================"
 echo " PRIMER DESIGN PIPELINE SETUP"
@@ -70,12 +72,33 @@ TMPDIR=~/tmp pip install \
     matplotlib \
     scipy
 
+pip install "networkx>=3.1" --upgrade 2>/dev/null
+
 # ── STEP 4: Fix PrimerServer2 Python 3.13 ───────────────────
 echo ""
 echo "=== STEP 4: Fixing PrimerServer2 for Python 3.13 ==="
 sed -i 's/from distutils.version import LooseVersion/from packaging.version import Version as LooseVersion/' \
     $(python3 -c 'import site; print(site.getsitepackages()[0])')/primerserver2/cmd/primertool.py
 echo "PrimerServer2 patched"
+
+# Patch design_primer.py for primer3-py v2 API
+python3 - << INNEREOF
+import re
+filepath = "$(python3 -c 'import site; print(site.getsitepackages()[0])')/primerserver2/core/design_primer.py"
+with open(filepath) as f:
+    content = f.read()
+content = content.replace('primer3.bindings.setP3Globals(', '_p3_global = ')
+content = content.replace('primer3.bindings.designPrimers(', 'primer3.design_primers(')
+content = re.sub(r'(primer3\.design_primers\(\s*\{[^}]+\}\s*)\)', r'\1, _p3_global)', content, flags=re.DOTALL)
+with open(filepath, 'w') as f:
+    f.write(content)
+print("design_primer.py patched")
+INNEREOF
+
+# Patch output.py
+sed -i 's/PRIMER_PAIR_NUM_RETURNED_FINAL/PRIMER_PAIR_NUM_RETURNED/g' \
+    $(python3 -c 'import site; print(site.getsitepackages()[0])')/primerserver2/core/output.py
+echo "output.py patched"
 
 # ── STEP 5: Download binaries ────────────────────────────────
 mkdir -p ~/bin
@@ -167,25 +190,30 @@ echo ""
 echo "=== STEP 10: Downloading bacterial CDS (E. coli + Salmonella) ==="
 
 # Download and keep only first 20 sequences (small subset for demo)
+# Get script directory so files go to the right place
+BACT_TARGET="$SCRIPT_DIR/bacterial_cds/target"
+BACT_NONTARGET="$SCRIPT_DIR/bacterial_cds/nontarget"
+mkdir -p "$BACT_TARGET" "$BACT_NONTARGET"
+
 efetch -db nuccore \
     -query "Escherichia coli K-12 MG1655[organism]" \
-    -format fasta_cds_na 2>/dev/null | \
-    python3 -c "
-from Bio import SeqIO, bgzf
-import sys
-seqs = list(SeqIO.parse(sys.stdin, 'fasta'))[:20]
-SeqIO.write(seqs, 'bacterial_cds/target/EcoliK12_cds.fna', 'fasta')
+    -format fasta_cds_na 2>/dev/null | head -500 > /tmp/ecoli_raw.fna
+
+python3 -c "
+from Bio import SeqIO
+seqs = list(SeqIO.parse('/tmp/ecoli_raw.fna', 'fasta'))[:20]
+SeqIO.write(seqs, '$BACT_TARGET/EcoliK12_cds.fna', 'fasta')
 print(f'E. coli: {len(seqs)} CDS sequences saved')
 "
 
 efetch -db nuccore \
     -query "Salmonella enterica Typhimurium[organism]" \
-    -format fasta_cds_na 2>/dev/null | \
-    python3 -c "
+    -format fasta_cds_na 2>/dev/null | head -500 > /tmp/salmonella_raw.fna
+
+python3 -c "
 from Bio import SeqIO
-import sys
-seqs = list(SeqIO.parse(sys.stdin, 'fasta'))[:20]
-SeqIO.write(seqs, 'bacterial_cds/nontarget/SalmonellaTM_cds.fna', 'fasta')
+seqs = list(SeqIO.parse('/tmp/salmonella_raw.fna', 'fasta'))[:20]
+SeqIO.write(seqs, '$BACT_NONTARGET/SalmonellaTM_cds.fna', 'fasta')
 print(f'Salmonella: {len(seqs)} CDS sequences saved')
 "
 
@@ -241,7 +269,20 @@ echo " SETUP COMPLETE"
 echo "========================================"
 echo ""
 echo "Next steps:"
-echo "  1. Copy exploretoolsfinal.sh to ~/primer/primer-framework/"
-echo "  2. cd ~/primer/primer-framework"
-echo "  3. bash exploretoolsfinal.sh all"
+echo "  1. Put exploretoolsfinal.sh in the SAME folder as this script: $SCRIPT_DIR"
+echo "  2. conda activate primer-env"
+echo "  3. cd $SCRIPT_DIR"
+echo "  4. bash exploretoolsfinal.sh all"
 echo ""
+# Fix output.py for PrimerServer2
+python3 - << INNEREOF
+filepath = "$(python3 -c 'import site; print(site.getsitepackages()[0])')/primerserver2/core/output.py"
+with open(filepath) as f:
+    content = f.read()
+old = "raw_rank = primers[f'PRIMER_PAIR_AMPLICON_NUM_RANK_{amplicon_rank}']"
+new = "raw_rank = primers.get(f'PRIMER_PAIR_AMPLICON_NUM_RANK_{amplicon_rank}', amplicon_rank)"
+content = content.replace(old, new)
+with open(filepath, 'w') as f:
+    f.write(content)
+print("output.py fixed")
+INNEREOF

@@ -1,4 +1,5 @@
 #!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # =============================================================================
 # exploretools_final.sh
 # Progressive refinement primer design pipeline
@@ -11,7 +12,7 @@
 #   Stage 3b — Thermodynamics: MELTING + oligo-melting on filtered primers
 #   Stage 4a — Specificity: BLAST + MFEprimer on filtered primers
 #   Stage 4b — In-silico PCR: isPcr/ipcress/primersearch/tntblast on top 100 pairs
-#   Stage 5  — Tiling schemes (independent): primalscheme, PS3, varvamp, olivar
+#   Stage 5  — Tiling schemes (independent): PS3, varvamp, olivar
 #   Stage 6  — Taxon-specific + multiplex: PUPpy, NGS-PrimerPlex
 #   Stage 7  — Independent generators: DegePrime, primerdiffer, primer3-py
 #
@@ -56,8 +57,8 @@ MELTING_DATA="$HOME/MELTING5.2.0/Data"
 MFEPRIMER="$HOME/bin/mfeprimer"
 DEGEPRIME="$HOME/DegePrime"
 NPP="$HOME/NGS-PrimerPlex/NGS_primerplex.py"
-PUPPY_TARGET="$HOME/primer/primer-framework/bacterial_cds/target"
-PUPPY_NONTARGET="$HOME/primer/primer-framework/bacterial_cds/nontarget"
+PUPPY_TARGET="$SCRIPT_DIR/bacterial_cds/target"
+PUPPY_NONTARGET="$SCRIPT_DIR/bacterial_cds/nontarget"
 
 # ── Key output files (passed between stages) ──────────────────────────────────
 # Stage 1 outputs:
@@ -626,23 +627,7 @@ echo "Purpose: design complete amplicon tiling schemes across the genome"
 echo "These tools run independently — they generate AND optimise their own primers"
 echo ""
 
-section "5a) primalscheme — amplicon tiling (all 5 genomes)"
-info "Input: test5.fasta"
-
-rm -rf "$OUTDIR/primalscheme_out"
-primalscheme multiplex -a 400 -o "$OUTDIR/primalscheme_out" "$FASTA" \
-    2>&1 | tee "$OUTDIR/primalscheme.log" | head -20 || true
-
-if [[ -d "$OUTDIR/primalscheme_out" ]] && ls "$OUTDIR/primalscheme_out/"* 2>/dev/null | head -1 | grep -q .; then
-    pass "primalscheme → $OUTDIR/primalscheme_out"
-    STATUS[primalscheme]="PASS"
-    ls "$OUTDIR/primalscheme_out/"
-else
-    fail "primalscheme failed — see $OUTDIR/primalscheme.log"
-    STATUS[primalscheme]="FAIL"
-fi
-
-section "5b) PrimalScheme3 — MSA-aware tiling"
+section "5a) PrimalScheme3 — MSA-aware tiling"
 info "Input:  $MSA_FASTA (mafft alignment from Stage 1)"
 rm -rf "$OUTDIR/ps3_out"
 primalscheme3 scheme-create \
@@ -966,7 +951,7 @@ echo "  Stage 3a → ~2,000 filtered (Tm 57-63 + structure)"
 echo "  Stage 3b → Tm annotated (MELTING, oligo-melting)"
 echo "  Stage 4a → Specificity checked (BLAST, MFEprimer)"
 echo "  Stage 4b → PCR confirmed (isPcr, ipcress, primersearch, tntblast)"
-echo "  Stage 5  → Tiling schemes (primalscheme, PS3, varvamp, olivar)"
+echo "  Stage 5  → Tiling schemes (PS3, varvamp, olivar)"
 echo "  Stage 6  → Specialised (PUPpy, NGS-PrimerPlex)"
 echo "  Stage 7  → Other generators (DegePrime, primerdiffer)"
 echo ""
@@ -991,7 +976,6 @@ ROLE[ispcr]="in-silico-PCR";          STAGEMAP[ispcr]="4b"
 ROLE[ipcress]="in-silico-PCR";        STAGEMAP[ipcress]="4b"
 ROLE[primersearch]="in-silico-PCR";   STAGEMAP[primersearch]="4b"
 ROLE[tntblast]="in-silico-PCR";       STAGEMAP[tntblast]="4b"
-ROLE[primalscheme]="tiling-scheme";   STAGEMAP[primalscheme]="5"
 ROLE[primalscheme3]="tiling-scheme";  STAGEMAP[primalscheme3]="5"
 ROLE[varvamp]="tiling-scheme";        STAGEMAP[varvamp]="5"
 ROLE[olivar]="tiling-scheme";         STAGEMAP[olivar]="5"
@@ -1008,7 +992,7 @@ TOOL_ORDER=(
     seqkit bowtie2
     blastn mfeprimer primerdiffer
     ispcr ipcress primersearch tntblast
-    primalscheme primalscheme3 varvamp olivar
+    primalscheme3 varvamp olivar
     puppy ngs_primerplex
     degeprime primerserver2
 )
@@ -1047,7 +1031,7 @@ echo "            pairs_filtered.tsv (matched pairs)  pairs_100_*.txt (top 100)"
 echo "  Stage 3b: melting_out/  oligomelting_results.txt"
 echo "  Stage 4a: blast_results.txt  mfeprimer_spec/dimer/hairpin  primerdiffer_out/"
 echo "  Stage 4b: ispcr_output.fasta  ipcress_output.txt  primersearch_output.txt  tntblast_output.txt"
-echo "  Stage 5:  primalscheme_out/  ps3_out/  varvamp_out/  olivar_out/"
+echo "  Stage 5:  ps3_out/  varvamp_out/  olivar_out/"
 echo "  Stage 6:  puppy_primers/  npp_run.log"
 echo "  Stage 7:  degeprime_output.tsv"
 echo ""
@@ -1090,7 +1074,7 @@ case "$STAGE" in
         echo "  stage3b — thermodynamics on filtered (MELTING, oligo-melting)"
         echo "  stage4a — specificity on filtered (BLAST, MFEprimer, primerdiffer)"
         echo "  stage4b — in-silico PCR on top 100 pairs (isPcr, ipcress, primersearch, tntblast)"
-        echo "  stage5  — tiling schemes (primalscheme, PS3, varvamp, olivar)"
+        echo "  stage5  — tiling schemes (PS3, varvamp, olivar)"
         echo "  stage6  — taxon-specific + multiplex (PUPpy, NGS-PrimerPlex)"
         echo "  stage7  — other generators (DegePrime, primer3-py multi-genome)"
         ;;
