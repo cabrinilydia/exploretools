@@ -1,0 +1,22 @@
+# ── Test / demo input data ────────────────────────────────────
+test5.fasta
+test5.fasta.*
+
+# ── Bacterial CDS demo data ───────────────────────────────────
+bacterial_cds/
+
+# ── NCBI downloads ────────────────────────────────────────────
+ncbi_dataset/
+ncbi_dataset.zip
+datasets/
+
+# ── MD5 checksums ─────────────────────────────────────────────
+md5sum.txt
+*.md5
+
+# ── Demo run logs ─────────────────────────────────────────────
+demo_run_final.log
+*.log
+
+# ── Tool outputs ──────────────────────────────────────────────
+tool_outputs_final/

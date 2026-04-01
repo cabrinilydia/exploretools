@@ -5,30 +5,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Progressive refinement primer design pipeline
 # All 21 tools — each stage uses outputs from previous stages
 #
-# PIPELINE FLOW:
-#   Stage 1  — Alignment (mafft, clustalo)
-#   Stage 2  — Generate raw candidates: primer3 → 20,000 raw primers
-#   Stage 3a — Pre-filter: primer3-py Tm/structure → ~2,000 good primers
-#   Stage 3b — Thermodynamics: MELTING + oligo-melting on filtered primers
-#   Stage 4a — Specificity: BLAST + MFEprimer on filtered primers
-#   Stage 4b — In-silico PCR: isPcr/ipcress/primersearch/tntblast on top 100 pairs
-#   Stage 5  — Tiling schemes (independent): PS3, varvamp, olivar
-#   Stage 6  — Taxon-specific + multiplex: PUPpy, NGS-PrimerPlex
-#   Stage 7  — Independent generators: DegePrime, primerdiffer, primer3-py
+# PIPELINE GROUPS (rearranged to match corrected markdown):
+#   Align: MAFFT, Clustal Omega
+#   Generate & Pre-filter: primer3_core, primer3-py filter, DegePrime, primer3-py multi
+#   Filter & Score: MELTING, oligo-melting, BLAST, MFEprimer, seqkit, bowtie2, isPcr, ipcress, primersearch, tntblast
+#   Optimize / panel selection: olivar, NGS-PrimerPlex
+#   Specialized workflows: PrimalScheme3, varvamp, PUPpy, PrimerServer2, primerdiffer
 #
 # Run from: ~/primer/primer-framework
 # Conda env: primer-env
 # Usage:
-#   bash exploretools_final.sh          # run everything
-#   bash exploretools_final.sh stage1   # alignment
-#   bash exploretools_final.sh stage2   # raw candidate generation
-#   bash exploretools_final.sh stage3a  # pre-filter Tm/structure
-#   bash exploretools_final.sh stage3b  # thermodynamics on filtered
-#   bash exploretools_final.sh stage4a  # specificity on filtered
-#   bash exploretools_final.sh stage4b  # in-silico PCR on top 100 pairs
-#   bash exploretools_final.sh stage5   # tiling schemes
-#   bash exploretools_final.sh stage6   # taxon-specific + multiplex
-#   bash exploretools_final.sh stage7   # other independent generators
+#   bash exploretools_rearranged.sh                    # run everything
+#   bash exploretools_rearranged.sh align              # alignment
+#   bash exploretools_rearranged.sh generate_prefilter # candidate generation + pre-filter
+#   bash exploretools_rearranged.sh filter_score       # thermodynamics + specificity + in-silico PCR
+#   bash exploretools_rearranged.sh optimize           # olivar + NGS-PrimerPlex
+#   bash exploretools_rearranged.sh specialized        # PS3 + varvamp + PUPpy + PrimerServer2 + primerdiffer
 # =============================================================================
 
 set -u  # No set -e — keep going even if individual tools fail
@@ -116,7 +108,10 @@ PSEOF
 ###############################################################################
 # STAGE 1 — ALIGNMENT
 ###############################################################################
-stage1() {
+###############################################################################
+# ALIGN
+###############################################################################
+align() {
 banner "STAGE 1 — ALIGNMENT (all 5 genomes)"
 echo "Purpose: align all 5 genomes for MSA-based tools (DegePrime, varvamp, PS3)"
 echo ""
@@ -149,9 +144,9 @@ flow "Stage 1 output → $MSA_FASTA used by: DegePrime, varvamp, PrimalScheme3"
 }
 
 ###############################################################################
-# STAGE 2 — GENERATE RAW CANDIDATES
+# GENERATE & PRE-FILTER
 ###############################################################################
-stage2() {
+generate_prefilter() {
 banner "STAGE 2 — GENERATE RAW CANDIDATES (~20,000)"
 echo "Purpose: generate maximum possible primers from the reference genome"
 echo "Design principle: cast wide net first, filter later"
@@ -210,12 +205,7 @@ else
 fi
 
 flow "Stage 2 output → $((NLEFT+NRIGHT)) raw primers → fed into Stage 3a filter"
-}
 
-###############################################################################
-# STAGE 3a — PRE-FILTER: Tm + STRUCTURE
-###############################################################################
-stage3a() {
 banner "STAGE 3a — PRE-FILTER: Tm + STRUCTURE (~2,000 candidates)"
 echo "Purpose: fast cheap filters first — reject bad Tm, hairpins, homodimers"
 echo "Input:   $P3_ALL (20,000 raw primers from Stage 2)"
@@ -332,12 +322,113 @@ fi
 
 flow "Stage 3a output → $FILTERED_FASTA used by: MELTING, oligo-melting, BLAST, MFEprimer"
 flow "Stage 3a output → $PAIRS_100_ISPCR etc used by: isPcr, ipcress, primersearch, tntblast"
+
+banner "GENERATE & PRE-FILTER — INDEPENDENT GENERATORS"
+echo "These tools stay in the generate & pre-filter bucket in the corrected markdown"
+echo ""
+
+section "7a) DegePrime — degenerate primers from MSA"
+info "Input:  $MSA_FASTA (mafft alignment from Stage 1)"
+info "Step 1: TrimAlignment.pl → trimmed alignment"
+info "Step 2: DegePrime.pl     → degenerate primer windows"
+
+perl "$DEGEPRIME/TrimAlignment.pl" \
+    -i "$MSA_FASTA" \
+    -o "$OUTDIR/mafft_trimmed.fasta" \
+    -min 0.9 2>"$OUTDIR/trim.log" || true
+
+perl "$DEGEPRIME/DegePrime.pl" \
+    -i "$OUTDIR/mafft_trimmed.fasta" \
+    -d 12 -l 20 \
+    -o "$OUTDIR/degeprime_output.tsv" \
+    2>"$OUTDIR/degeprime.log" || true
+
+if [[ -s "$OUTDIR/degeprime_output.tsv" ]]; then
+    NLINES=$(wc -l < "$OUTDIR/degeprime_output.tsv")
+    if [[ "$NLINES" -gt 1 ]]; then
+        pass "DegePrime → $NLINES primer windows → $OUTDIR/degeprime_output.tsv"
+        STATUS[degeprime]="PASS"
+        head -4 "$OUTDIR/degeprime_output.tsv"
+    else
+        fail "DegePrime: only header — alignment may be too uniform"
+        STATUS[degeprime]="FAIL"
+    fi
+else
+    fail "DegePrime failed"; STATUS[degeprime]="FAIL"
+fi
+
+
+
+section "7b) primer3-py — design primers from all 5 genomes"
+info "Input:  all 5 genomes in test5.fasta"
+info "Output: $OUTDIR/primer3py_output.txt"
+
+python3 - <<'PYEOF'
+import re
+import primer3
+from Bio import SeqIO
+
+seqs = list(SeqIO.parse("test5.fasta", "fasta"))
+total = 0
+
+with open("tool_outputs_final/primer3py_output.txt", "w") as fout:
+    fout.write("genome_id\tpairs_returned\tcleaned_ambiguous_bases\n")
+
+    for s in seqs:
+        raw_seq = str(s.seq).upper()
+        cleaned_seq = re.sub(r'[^ACGTN]', 'N', raw_seq)
+
+        num_changed = sum(1 for a, b in zip(raw_seq, cleaned_seq) if a != b)
+
+        try:
+            result = primer3.design_primers(
+                {
+                    "SEQUENCE_ID": s.id,
+                    "SEQUENCE_TEMPLATE": cleaned_seq
+                },
+                {
+                    "PRIMER_OPT_SIZE": 20,
+                    "PRIMER_MIN_SIZE": 18,
+                    "PRIMER_MAX_SIZE": 25,
+                    "PRIMER_OPT_TM": 60.0,
+                    "PRIMER_MIN_TM": 57.0,
+                    "PRIMER_MAX_TM": 63.0,
+                    "PRIMER_MIN_GC": 40.0,
+                    "PRIMER_MAX_GC": 60.0,
+                    "PRIMER_NUM_RETURN": 50,
+                    "PRIMER_PRODUCT_SIZE_RANGE": [[100, 400]],
+                }
+            )
+
+            n = result.get("PRIMER_PAIR_NUM_RETURNED", 0)
+            total += n
+            fout.write(f"{s.id}\t{n}\t{num_changed}\n")
+
+            if num_changed > 0:
+                print(f"  {s.id}: {n} pairs  (cleaned {num_changed} ambiguous base(s) → N)")
+            else:
+                print(f"  {s.id}: {n} pairs")
+
+        except Exception as e:
+            fout.write(f"{s.id}\tERROR\t{num_changed}\n")
+            print(f"  {s.id}: ERROR → {e}")
+
+print(f"Total: {total} pairs across {len(seqs)} genomes → tool_outputs_final/primer3py_output.txt")
+PYEOF
+
+if [[ -s "$OUTDIR/primer3py_output.txt" ]]; then
+    pass "primer3-py → $OUTDIR/primer3py_output.txt"
+    STATUS[primer3py_multi]="PASS"
+else
+    fail "primer3-py multi-genome failed"
+    STATUS[primer3py_multi]="FAIL"
+fi
 }
 
 ###############################################################################
-# STAGE 3b — THERMODYNAMICS on FILTERED PRIMERS
+# FILTER & SCORE
 ###############################################################################
-stage3b() {
+filter_score() {
 banner "STAGE 3b — THERMODYNAMICS on FILTERED PRIMERS"
 echo "Purpose: detailed Tm with salt correction on the ~2,000 filtered candidates"
 echo "Input:   $FILTERED_FASTA (filtered primers from Stage 3a)"
@@ -389,12 +480,7 @@ else
 fi
 
 flow "Stage 3b adds Tm annotation to filtered primer set"
-}
 
-###############################################################################
-# STAGE 4a — SPECIFICITY on FILTERED PRIMERS
-###############################################################################
-stage4a() {
 banner "STAGE 4a — SPECIFICITY CHECKING on FILTERED PRIMERS"
 echo "Purpose: check where filtered primers bind across all 5 genomes"
 echo "Input:   $FILTERED_FASTA (filtered primers from Stage 3a)"
@@ -433,6 +519,7 @@ else
     fail "blastn: no hits"; STATUS[blastn]="FAIL"
 fi
 
+
 section "4a-ii) MFEprimer — specificity + dimer + hairpin on filtered primers"
 info "Input:  $FILTERED_FASTA"
 info "Output: mfeprimer_spec.txt  mfeprimer_dimer.txt  mfeprimer_hairpin.txt"
@@ -449,50 +536,6 @@ else
     fail "MFEprimer failed"; STATUS[mfeprimer]="FAIL"
 fi
 
-section "4a-iii) primerdiffer — discriminatory primers all 10 genome pairs"
-info "Input:  all 5 genomes — 10 unique pairs"
-info "Output: $OUTDIR/primerdiffer_all/"
-
-# Extract all 5 genomes to separate files
-python3 - << PDEOF
-from Bio import SeqIO
-seqs = list(SeqIO.parse("$FASTA","fasta"))
-for s in seqs:
-    SeqIO.write([s], f"$OUTDIR/{s.id}.fasta", "fasta")
-print(f"Extracted {len(seqs)} genomes")
-PDEOF
-
-# Run all 10 pairs
-python3 - << PDEOF2
-import subprocess, os
-from itertools import combinations
-seqs = ["MN908947.3","MN985325.1","MN988713.1","MN938384.1","MN975262.1"]
-pairs = list(combinations(seqs, 2))
-total = 0
-for g1, g2 in pairs:
-    outdir = f"$OUTDIR/primerdiffer_all/{g1}_vs_{g2}"
-    os.makedirs(outdir, exist_ok=True)
-    cmd = ["primerdesign.py",
-           "-g1", os.path.realpath(f"$OUTDIR/{g1}.fasta"),
-           "-g2", os.path.realpath(f"$OUTDIR/{g2}.fasta"),
-           "-pos", f"{g1}:1-29903",
-           "-d", outdir]
-    subprocess.run(cmd, capture_output=True)
-    n = sum(len(open(os.path.join(outdir,f)).readlines())
-            for f in os.listdir(outdir) if f.endswith(".txt"))
-    total += n
-    print(f"  {g1} vs {g2}: {n} primers")
-print(f"Total: {total} discriminatory primers across {len(pairs)} pairs")
-PDEOF2
-
-if [[ -d "$OUTDIR/primerdiffer_all" ]]; then
-    NTOTAL=$(find "$OUTDIR/primerdiffer_all" -name "*.txt" -exec cat {} \; |         grep -c "." 2>/dev/null || echo 0)
-    pass "primerdiffer → $NTOTAL discriminatory primers → $OUTDIR/primerdiffer_all/"
-    STATUS[primerdiffer]="PASS"
-else
-    fail "primerdiffer failed"; STATUS[primerdiffer]="FAIL"
-fi
-
 
 section "4a-iv) seqkit — primer statistics"
 info "Input:  $FILTERED_FASTA"
@@ -504,6 +547,7 @@ if [[ -s "$OUTDIR/seqkit_primer_stats.txt" ]]; then
 else
     fail "seqkit failed"; STATUS[seqkit]="FAIL"
 fi
+
 
 section "4a-v) bowtie2 + samtools — alignment-based specificity"
 info "Input:  $FILTERED_FASTA aligned to all 5 genomes"
@@ -519,12 +563,9 @@ else
 fi
 
 flow "Stage 4a narrows filtered primers to those with good specificity profiles"
-}
 
-###############################################################################
-# STAGE 4b — IN-SILICO PCR on TOP 100 FILTERED PAIRS
-###############################################################################
-stage4b() {
+flow "Stage 4a narrows filtered primers to those with good specificity profiles"
+
 banner "STAGE 4b — IN-SILICO PCR on TOP 100 FILTERED PAIRS"
 echo "Purpose: simulate actual PCR amplification with the best filtered pairs"
 echo "Input:   pairs_100_*.txt (top 100 pairs from Stage 3a filtered set)"
@@ -619,51 +660,12 @@ flow "Stage 4b confirms which filtered pairs actually amplify the target"
 }
 
 ###############################################################################
-# STAGE 5 — TILING SCHEMES (independent)
+# OPTIMIZE / PANEL SELECTION
 ###############################################################################
-stage5() {
-banner "STAGE 5 — TILING SCHEMES (independent tools)"
-echo "Purpose: design complete amplicon tiling schemes across the genome"
-echo "These tools run independently — they generate AND optimise their own primers"
+optimize() {
+banner "OPTIMIZE / PANEL SELECTION"
+echo "Purpose: run optimisation-oriented or panel-selection tools"
 echo ""
-
-section "5a) PrimalScheme3 — MSA-aware tiling"
-info "Input:  $MSA_FASTA (mafft alignment from Stage 1)"
-rm -rf "$OUTDIR/ps3_out"
-primalscheme3 scheme-create \
-    --msa "$MSA_FASTA" \
-    --output "$OUTDIR/ps3_out" \
-    --amplicon-size 400 \
-    2>"$OUTDIR/ps3.log" || true
-if [[ -d "$OUTDIR/ps3_out" ]] && \
-   ls "$OUTDIR/ps3_out/"* 2>/dev/null | head -1 | grep -q .; then
-    pass "PrimalScheme3 → $OUTDIR/ps3_out/"
-    STATUS[primalscheme3]="PASS"
-    ls "$OUTDIR/ps3_out/"
-else
-    fail "PrimalScheme3 failed"; STATUS[primalscheme3]="FAIL"
-fi
-
-section "5c) varvamp — variation-aware tiling"
-info "Input: $MSA_FASTA (mafft alignment from Stage 1)"
-
-if [[ ! -f "$MSA_FASTA" ]]; then
-    fail "varvamp failed — missing $MSA_FASTA. Run stage1 first."
-    STATUS[varvamp]="FAIL"
-else
-    rm -rf "$OUTDIR/varvamp_out"
-    varvamp tiled "$MSA_FASTA" "$OUTDIR/varvamp_out" \
-        2>&1 | tee "$OUTDIR/varvamp.log" | head -20 || true
-
-    if [[ -d "$OUTDIR/varvamp_out" ]] && ls "$OUTDIR/varvamp_out/"* 2>/dev/null | head -1 | grep -q .; then
-        pass "varvamp → $OUTDIR/varvamp_out"
-        STATUS[varvamp]="PASS"
-        ls "$OUTDIR/varvamp_out/"
-    else
-        fail "varvamp failed — see $OUTDIR/varvamp.log"
-        STATUS[varvamp]="FAIL"
-    fi
-fi
 
 section "5d) olivar — SADDLE optimization (3000bp demo region)"
 info "Input:  first 3000bp of MN908947.3 (full genome takes hours)"
@@ -693,13 +695,86 @@ if [[ -f "$OUTDIR/olivar_db/sars2_olivar.olvr" ]]; then
 else
     fail "olivar build failed"; STATUS[olivar]="FAIL"
 fi
+
+section "6b) NGS-PrimerPlex — multiplex panel for 2 target regions"
+info "Input:  npp_targets.bed (2 SARS-CoV-2 regions)"
+info "        test5.fasta (reference genome)"
+info "Output: 8 amplicons across 2 target regions"
+
+cat > "$OUTDIR/npp_targets.bed" << 'EOF'
+MN908947.3	400	900	target1
+MN908947.3	1200	1700	target2
+EOF
+
+python3 "$NPP" \
+    --regions-file "$OUTDIR/npp_targets.bed" \
+    --reference-genome "$FASTA" \
+    --min-amplicon-length 100 \
+    --max-amplicon-length 300 \
+    --optimal-amplicon-length 200 \
+    --min-primer-melting-temp 57 \
+    --max-primer-melting-temp 63 \
+    --optimal-primer-melting-temp 60 \
+    --max-primer-nonspecific 2 \
+    --primers-number1 2 \
+    --return-variants-number 1 \
+    2>&1 | tee "$OUTDIR/npp_run.log" | \
+    grep -E "100\.0%|amplicons|finished|written|Number of" | head -10 &
+
+NPP_PID=$!
+info "NGS-PrimerPlex running in background (PID $NPP_PID)"
+info "Monitor: tail -f $OUTDIR/npp_run.log"
+info "Expected: 8 amplicons, ~5 minutes"
+STATUS[ngs_primerplex]="RUNNING"
 }
 
 ###############################################################################
-# STAGE 6 — TAXON-SPECIFIC + MULTIPLEX
+# SPECIALIZED WORKFLOWS
 ###############################################################################
-stage6() {
-banner "STAGE 6 — TAXON-SPECIFIC + MULTIPLEX PANEL"
+specialized() {
+banner "SPECIALIZED WORKFLOWS"
+echo "Purpose: run specialized end-to-end or application-specific workflows"
+echo ""
+
+section "5a) PrimalScheme3 — MSA-aware tiling"
+info "Input:  $MSA_FASTA (mafft alignment from Stage 1)"
+rm -rf "$OUTDIR/ps3_out"
+primalscheme3 scheme-create \
+    --msa "$MSA_FASTA" \
+    --output "$OUTDIR/ps3_out" \
+    --amplicon-size 400 \
+    2>"$OUTDIR/ps3.log" || true
+if [[ -d "$OUTDIR/ps3_out" ]] && \
+   ls "$OUTDIR/ps3_out/"* 2>/dev/null | head -1 | grep -q .; then
+    pass "PrimalScheme3 → $OUTDIR/ps3_out/"
+    STATUS[primalscheme3]="PASS"
+    ls "$OUTDIR/ps3_out/"
+else
+    fail "PrimalScheme3 failed"; STATUS[primalscheme3]="FAIL"
+fi
+
+
+section "5c) varvamp — variation-aware tiling"
+info "Input: $MSA_FASTA (mafft alignment from Stage 1)"
+
+if [[ ! -f "$MSA_FASTA" ]]; then
+    fail "varvamp failed — missing $MSA_FASTA. Run stage1 first."
+    STATUS[varvamp]="FAIL"
+else
+    rm -rf "$OUTDIR/varvamp_out"
+    varvamp tiled "$MSA_FASTA" "$OUTDIR/varvamp_out" \
+        2>&1 | tee "$OUTDIR/varvamp.log" | head -20 || true
+
+    if [[ -d "$OUTDIR/varvamp_out" ]] && ls "$OUTDIR/varvamp_out/"* 2>/dev/null | head -1 | grep -q .; then
+        pass "varvamp → $OUTDIR/varvamp_out"
+        STATUS[varvamp]="PASS"
+        ls "$OUTDIR/varvamp_out/"
+    else
+        fail "varvamp failed — see $OUTDIR/varvamp.log"
+        STATUS[varvamp]="FAIL"
+    fi
+fi
+
 
 section "6a) PUPpy — taxon-specific primers (E. coli K-12 vs Salmonella)"
 info "Input:  bacterial_cds/target/ (EcoliK12_cds.fna)"
@@ -754,76 +829,6 @@ else
     STATUS[puppy]="SKIP"
 fi
 
-section "6b) NGS-PrimerPlex — multiplex panel for 2 target regions"
-info "Input:  npp_targets.bed (2 SARS-CoV-2 regions)"
-info "        test5.fasta (reference genome)"
-info "Output: 8 amplicons across 2 target regions"
-
-cat > "$OUTDIR/npp_targets.bed" << 'EOF'
-MN908947.3	400	900	target1
-MN908947.3	1200	1700	target2
-EOF
-
-python3 "$NPP" \
-    --regions-file "$OUTDIR/npp_targets.bed" \
-    --reference-genome "$FASTA" \
-    --min-amplicon-length 100 \
-    --max-amplicon-length 300 \
-    --optimal-amplicon-length 200 \
-    --min-primer-melting-temp 57 \
-    --max-primer-melting-temp 63 \
-    --optimal-primer-melting-temp 60 \
-    --max-primer-nonspecific 2 \
-    --primers-number1 2 \
-    --return-variants-number 1 \
-    2>&1 | tee "$OUTDIR/npp_run.log" | \
-    grep -E "100\.0%|amplicons|finished|written|Number of" | head -10 &
-
-NPP_PID=$!
-info "NGS-PrimerPlex running in background (PID $NPP_PID)"
-info "Monitor: tail -f $OUTDIR/npp_run.log"
-info "Expected: 8 amplicons, ~5 minutes"
-STATUS[ngs_primerplex]="RUNNING"
-}
-
-###############################################################################
-# STAGE 7 — OTHER INDEPENDENT GENERATORS
-###############################################################################
-stage7() {
-banner "STAGE 7 — OTHER INDEPENDENT PRIMER GENERATORS"
-echo "These tools generate primers from alignments independently of Stage 2"
-echo ""
-
-section "7a) DegePrime — degenerate primers from MSA"
-info "Input:  $MSA_FASTA (mafft alignment from Stage 1)"
-info "Step 1: TrimAlignment.pl → trimmed alignment"
-info "Step 2: DegePrime.pl     → degenerate primer windows"
-
-perl "$DEGEPRIME/TrimAlignment.pl" \
-    -i "$MSA_FASTA" \
-    -o "$OUTDIR/mafft_trimmed.fasta" \
-    -min 0.9 2>"$OUTDIR/trim.log" || true
-
-perl "$DEGEPRIME/DegePrime.pl" \
-    -i "$OUTDIR/mafft_trimmed.fasta" \
-    -d 12 -l 20 \
-    -o "$OUTDIR/degeprime_output.tsv" \
-    2>"$OUTDIR/degeprime.log" || true
-
-if [[ -s "$OUTDIR/degeprime_output.tsv" ]]; then
-    NLINES=$(wc -l < "$OUTDIR/degeprime_output.tsv")
-    if [[ "$NLINES" -gt 1 ]]; then
-        pass "DegePrime → $NLINES primer windows → $OUTDIR/degeprime_output.tsv"
-        STATUS[degeprime]="PASS"
-        head -4 "$OUTDIR/degeprime_output.tsv"
-    else
-        fail "DegePrime: only header — alignment may be too uniform"
-        STATUS[degeprime]="FAIL"
-    fi
-else
-    fail "DegePrime failed"; STATUS[degeprime]="FAIL"
-fi
-
 
 section "7c) PrimerServer2 — target-focused primer design (5 SARS-CoV-2 regions)"
 info "Input:  5 diagnostic target regions with 500bp flanks"
@@ -873,146 +878,125 @@ else
     STATUS[primerserver2]="FAIL"
 fi
 
-section "7b) primer3-py — design primers from all 5 genomes"
-info "Input:  all 5 genomes in test5.fasta"
-info "Output: $OUTDIR/primer3py_output.txt"
 
-python3 - <<'PYEOF'
-import re
-import primer3
+section "4a-iii) primerdiffer — discriminatory primers all 10 genome pairs"
+info "Input:  all 5 genomes — 10 unique pairs"
+info "Output: $OUTDIR/primerdiffer_all/"
+
+# Extract all 5 genomes to separate files
+python3 - << PDEOF
 from Bio import SeqIO
+seqs = list(SeqIO.parse("$FASTA","fasta"))
+for s in seqs:
+    SeqIO.write([s], f"$OUTDIR/{s.id}.fasta", "fasta")
+print(f"Extracted {len(seqs)} genomes")
+PDEOF
 
-seqs = list(SeqIO.parse("test5.fasta", "fasta"))
+# Run all 10 pairs
+python3 - << PDEOF2
+import subprocess, os
+from itertools import combinations
+seqs = ["MN908947.3","MN985325.1","MN988713.1","MN938384.1","MN975262.1"]
+pairs = list(combinations(seqs, 2))
 total = 0
+for g1, g2 in pairs:
+    outdir = f"$OUTDIR/primerdiffer_all/{g1}_vs_{g2}"
+    os.makedirs(outdir, exist_ok=True)
+    cmd = ["primerdesign.py",
+           "-g1", os.path.realpath(f"$OUTDIR/{g1}.fasta"),
+           "-g2", os.path.realpath(f"$OUTDIR/{g2}.fasta"),
+           "-pos", f"{g1}:1-29903",
+           "-d", outdir]
+    subprocess.run(cmd, capture_output=True)
+    n = sum(len(open(os.path.join(outdir,f)).readlines())
+            for f in os.listdir(outdir) if f.endswith(".txt"))
+    total += n
+    print(f"  {g1} vs {g2}: {n} primers")
+print(f"Total: {total} discriminatory primers across {len(pairs)} pairs")
+PDEOF2
 
-with open("tool_outputs_final/primer3py_output.txt", "w") as fout:
-    fout.write("genome_id\tpairs_returned\tcleaned_ambiguous_bases\n")
-
-    for s in seqs:
-        raw_seq = str(s.seq).upper()
-        cleaned_seq = re.sub(r'[^ACGTN]', 'N', raw_seq)
-
-        num_changed = sum(1 for a, b in zip(raw_seq, cleaned_seq) if a != b)
-
-        try:
-            result = primer3.design_primers(
-                {
-                    "SEQUENCE_ID": s.id,
-                    "SEQUENCE_TEMPLATE": cleaned_seq
-                },
-                {
-                    "PRIMER_OPT_SIZE": 20,
-                    "PRIMER_MIN_SIZE": 18,
-                    "PRIMER_MAX_SIZE": 25,
-                    "PRIMER_OPT_TM": 60.0,
-                    "PRIMER_MIN_TM": 57.0,
-                    "PRIMER_MAX_TM": 63.0,
-                    "PRIMER_MIN_GC": 40.0,
-                    "PRIMER_MAX_GC": 60.0,
-                    "PRIMER_NUM_RETURN": 50,
-                    "PRIMER_PRODUCT_SIZE_RANGE": [[100, 400]],
-                }
-            )
-
-            n = result.get("PRIMER_PAIR_NUM_RETURNED", 0)
-            total += n
-            fout.write(f"{s.id}\t{n}\t{num_changed}\n")
-
-            if num_changed > 0:
-                print(f"  {s.id}: {n} pairs  (cleaned {num_changed} ambiguous base(s) → N)")
-            else:
-                print(f"  {s.id}: {n} pairs")
-
-        except Exception as e:
-            fout.write(f"{s.id}\tERROR\t{num_changed}\n")
-            print(f"  {s.id}: ERROR → {e}")
-
-print(f"Total: {total} pairs across {len(seqs)} genomes → tool_outputs_final/primer3py_output.txt")
-PYEOF
-
-if [[ -s "$OUTDIR/primer3py_output.txt" ]]; then
-    pass "primer3-py → $OUTDIR/primer3py_output.txt"
-    STATUS[primer3py_multi]="PASS"
+if [[ -d "$OUTDIR/primerdiffer_all" ]]; then
+    NTOTAL=$(find "$OUTDIR/primerdiffer_all" -name "*.txt" -exec cat {} \; |         grep -c "." 2>/dev/null || echo 0)
+    pass "primerdiffer → $NTOTAL discriminatory primers → $OUTDIR/primerdiffer_all/"
+    STATUS[primerdiffer]="PASS"
 else
-    fail "primer3-py multi-genome failed"
-    STATUS[primer3py_multi]="FAIL"
+    fail "primerdiffer failed"; STATUS[primerdiffer]="FAIL"
 fi
+
+
 }
 
 ###############################################################################
 # SUMMARY
 ###############################################################################
 show_summary() {
-banner "PIPELINE SUMMARY — Progressive Refinement Results"
+banner "PIPELINE SUMMARY — Rearranged by Corrected Markdown"
 echo ""
-echo -e "${BOLD}Pipeline flow:${NC}"
-echo "  Stage 2  → 20,000 raw primers (primer3_core)"
-echo "  Stage 3a → ~2,000 filtered (Tm 57-63 + structure)"
-echo "  Stage 3b → Tm annotated (MELTING, oligo-melting)"
-echo "  Stage 4a → Specificity checked (BLAST, MFEprimer)"
-echo "  Stage 4b → PCR confirmed (isPcr, ipcress, primersearch, tntblast)"
-echo "  Stage 5  → Tiling schemes (PS3, varvamp, olivar)"
-echo "  Stage 6  → Specialised (PUPpy, NGS-PrimerPlex)"
-echo "  Stage 7  → Other generators (DegePrime, primerdiffer)"
+echo -e "${BOLD}Pipeline groups:${NC}"
+echo "  Align                → MAFFT, Clustal Omega"
+echo "  Generate & Pre-filter→ primer3_core, primer3-py filter, DegePrime, primer3-py multi"
+echo "  Filter & Score       → MELTING, oligo-melting, BLAST, MFEprimer, seqkit, bowtie2, isPcr, ipcress, primersearch, tntblast"
+echo "  Optimize / selection → olivar, NGS-PrimerPlex"
+echo "  Specialized          → PrimalScheme3, varvamp, PUPpy, PrimerServer2, primerdiffer"
 echo ""
-printf "${BOLD}%-22s %-12s %-22s %-10s${NC}\n" "TOOL" "STATUS" "ROLE" "STAGE"
-printf "%-22s %-12s %-22s %-10s\n" "──────────────────────" "──────────" "──────────────────────" "──────────"
+printf "${BOLD}%-22s %-12s %-26s %-18s${NC}
+" "TOOL" "STATUS" "ROLE" "GROUP"
+printf "%-22s %-12s %-26s %-18s
+" "──────────────────────" "──────────" "──────────────────────────" "──────────────────"
 
-declare -A ROLE STAGEMAP
-ROLE[mafft]="alignment";              STAGEMAP[mafft]="1"
-ROLE[clustalo]="alignment";           STAGEMAP[clustalo]="1"
-ROLE[primer3_core]="raw-generation";  STAGEMAP[primer3_core]="2"
-ROLE[primer3py]="pre-filter";         STAGEMAP[primer3py]="3a"
-ROLE[melting]="thermodynamics";       STAGEMAP[melting]="3b"
-ROLE[oligomelting]="thermodynamics";  STAGEMAP[oligomelting]="3b"
-ROLE[seqkit]="primer-stats"
-    STAGEMAP[seqkit]="4a"
-    ROLE[bowtie2]="alignment-specificity"
-    STAGEMAP[bowtie2]="4a"
-    ROLE[blastn]="specificity";           STAGEMAP[blastn]="4a"
-ROLE[mfeprimer]="specificity";        STAGEMAP[mfeprimer]="4a"
-ROLE[primerdiffer]="specificity";     STAGEMAP[primerdiffer]="4a"
-ROLE[ispcr]="in-silico-PCR";          STAGEMAP[ispcr]="4b"
-ROLE[ipcress]="in-silico-PCR";        STAGEMAP[ipcress]="4b"
-ROLE[primersearch]="in-silico-PCR";   STAGEMAP[primersearch]="4b"
-ROLE[tntblast]="in-silico-PCR";       STAGEMAP[tntblast]="4b"
-ROLE[primalscheme3]="tiling-scheme";  STAGEMAP[primalscheme3]="5"
-ROLE[varvamp]="tiling-scheme";        STAGEMAP[varvamp]="5"
-ROLE[olivar]="tiling-scheme";         STAGEMAP[olivar]="5"
-ROLE[puppy]="taxon-specific";         STAGEMAP[puppy]="6"
-ROLE[ngs_primerplex]="multiplex";     STAGEMAP[ngs_primerplex]="6"
-ROLE[primerserver2]="target-focused-design"
-    STAGEMAP[primerserver2]="7c"
-    ROLE[degeprime]="degenerate-primers"; STAGEMAP[degeprime]="7"
+declare -A ROLE GROUPMAP
+ROLE[mafft]="alignment";                    GROUPMAP[mafft]="Align"
+ROLE[clustalo]="alignment";                 GROUPMAP[clustalo]="Align"
+ROLE[primer3_core]="raw-generation";        GROUPMAP[primer3_core]="Generate & Pre-filter"
+ROLE[primer3py]="pre-filter";               GROUPMAP[primer3py]="Generate & Pre-filter"
+ROLE[degeprime]="degenerate-primers";       GROUPMAP[degeprime]="Generate & Pre-filter"
+ROLE[primer3py_multi]="per-genome-design";  GROUPMAP[primer3py_multi]="Generate & Pre-filter"
+ROLE[melting]="thermodynamics";             GROUPMAP[melting]="Filter & Score"
+ROLE[oligomelting]="thermodynamics";        GROUPMAP[oligomelting]="Filter & Score"
+ROLE[blastn]="specificity";                 GROUPMAP[blastn]="Filter & Score"
+ROLE[mfeprimer]="specificity+structure";    GROUPMAP[mfeprimer]="Filter & Score"
+ROLE[seqkit]="primer-stats";                GROUPMAP[seqkit]="Filter & Score"
+ROLE[bowtie2]="alignment-specificity";      GROUPMAP[bowtie2]="Filter & Score"
+ROLE[ispcr]="in-silico-PCR";                GROUPMAP[ispcr]="Filter & Score"
+ROLE[ipcress]="in-silico-PCR";              GROUPMAP[ipcress]="Filter & Score"
+ROLE[primersearch]="in-silico-PCR";         GROUPMAP[primersearch]="Filter & Score"
+ROLE[tntblast]="in-silico-PCR";             GROUPMAP[tntblast]="Filter & Score"
+ROLE[olivar]="tiling-optimization";         GROUPMAP[olivar]="Optimize / panel selection"
+ROLE[ngs_primerplex]="multiplex-panel";     GROUPMAP[ngs_primerplex]="Optimize / panel selection"
+ROLE[primalscheme3]="tiling-scheme";        GROUPMAP[primalscheme3]="Specialized workflows"
+ROLE[varvamp]="variation-aware-tiling";     GROUPMAP[varvamp]="Specialized workflows"
+ROLE[puppy]="taxon-specific";               GROUPMAP[puppy]="Specialized workflows"
+ROLE[primerserver2]="target-focused-design";GROUPMAP[primerserver2]="Specialized workflows"
+ROLE[primerdiffer]="discriminatory-primers";GROUPMAP[primerdiffer]="Specialized workflows"
 
 TOOL_ORDER=(
     mafft clustalo
-    primer3_core primer3py
-    melting oligomelting
-    seqkit bowtie2
-    blastn mfeprimer primerdiffer
-    ispcr ipcress primersearch tntblast
-    primalscheme3 varvamp olivar
-    puppy ngs_primerplex
-    degeprime primerserver2
+    primer3_core primer3py degeprime primer3py_multi
+    melting oligomelting blastn mfeprimer seqkit bowtie2 ispcr ipcress primersearch tntblast
+    olivar ngs_primerplex
+    primalscheme3 varvamp puppy primerserver2 primerdiffer
 )
 
 PASS_COUNT=0; FAIL_COUNT=0; SKIP_COUNT=0
 for tool in "${TOOL_ORDER[@]}"; do
     s="${STATUS[$tool]:-SKIP}"
     role="${ROLE[$tool]:-unknown}"
-    stage="${STAGEMAP[$tool]:-?}"
+    group="${GROUPMAP[$tool]:-?}"
     if [[ "$s" == "PASS" ]]; then
-        printf "${GREEN}%-22s ✅ PASS      %-22s Stage %-4s${NC}\n" "$tool" "$role" "$stage"
+        printf "${GREEN}%-22s ✅ PASS      %-26s %-18s${NC}
+" "$tool" "$role" "$group"
         ((PASS_COUNT++))
     elif [[ "$s" == "FAIL" ]]; then
-        printf "${RED}%-22s ❌ FAIL      %-22s Stage %-4s${NC}\n" "$tool" "$role" "$stage"
+        printf "${RED}%-22s ❌ FAIL      %-26s %-18s${NC}
+" "$tool" "$role" "$group"
         ((FAIL_COUNT++))
     elif [[ "$s" == "RUNNING" ]]; then
-        printf "${CYAN}%-22s ⏳ RUNNING   %-22s Stage %-4s${NC}\n" "$tool" "$role" "$stage"
+        printf "${CYAN}%-22s ⏳ RUNNING   %-26s %-18s${NC}
+" "$tool" "$role" "$group"
         ((SKIP_COUNT++))
     else
-        printf "${YELLOW}%-22s ⚠️  %-8s   %-22s Stage %-4s${NC}\n" "$tool" "$s" "$role" "$stage"
+        printf "${YELLOW}%-22s ⚠️  %-8s   %-26s %-18s${NC}
+" "$tool" "$s" "$role" "$group"
         ((SKIP_COUNT++))
     fi
 done
@@ -1023,59 +1007,41 @@ echo -e "${BOLD}Results: ${GREEN}$PASS_COUNT PASS${NC}  ${RED}$FAIL_COUNT FAIL${
 echo ""
 echo -e "${BOLD}Output directory: $OUTDIR/${NC}"
 echo ""
-echo -e "${BOLD}Key files by stage:${NC}"
-echo "  Stage 1:  mafft_aligned.fasta"
-echo "  Stage 2:  primer3_output_left.txt (10k)  primer3_output_right.txt (10k)"
-echo "  Stage 3a: all_primers_tm.tsv (20k Tm)  primers_filtered.tsv (~2k good)"
-echo "            pairs_filtered.tsv (matched pairs)  pairs_100_*.txt (top 100)"
-echo "  Stage 3b: melting_out/  oligomelting_results.txt"
-echo "  Stage 4a: blast_results.txt  mfeprimer_spec/dimer/hairpin  primerdiffer_out/"
-echo "  Stage 4b: ispcr_output.fasta  ipcress_output.txt  primersearch_output.txt  tntblast_output.txt"
-echo "  Stage 5:  ps3_out/  varvamp_out/  olivar_out/"
-echo "  Stage 6:  puppy_primers/  npp_run.log"
-echo "  Stage 7:  degeprime_output.tsv"
+echo -e "${BOLD}Key files by group:${NC}"
+echo "  Align:                mafft_aligned.fasta"
+echo "  Generate & Pre-filter: primer3_output_left.txt  primer3_output_right.txt  primers_filtered.tsv  pairs_filtered.tsv  degeprime_output.tsv  primer3py_output.txt"
+echo "  Filter & Score:        melting_out/  oligomelting_results.txt  blast_results.txt  mfeprimer_*  bowtie2_primers.sam  ispcr_output.fasta  ipcress_output.txt  primersearch_output.txt  tntblast_output.txt"
+echo "  Optimize / selection:  olivar_out/  npp_run.log"
+echo "  Specialized:           ps3_out/  varvamp_out/  puppy_primers/  primerserver2_final_results.tsv  primerdiffer_all/"
 echo ""
 echo -e "${GREEN}${BOLD}Demo complete.${NC}"
 }
-
 ###############################################################################
 # MAIN
 ###############################################################################
-STAGE="${1:-all}"
-case "$STAGE" in
-    stage1)  stage1 ;;
-    stage2)  stage2 ;;
-    stage3a) stage3a ;;
-    stage3b) stage3b ;;
-    stage4a) stage4a ;;
-    stage4b) stage4b ;;
-    stage5)  stage5 ;;
-    stage6)  stage6 ;;
-    stage7)  stage7 ;;
-    summary) show_summary ;;
+GROUP="${1:-all}"
+case "$GROUP" in
+    align)               align ;;
+    generate_prefilter)  generate_prefilter ;;
+    filter_score)        filter_score ;;
+    optimize)            optimize ;;
+    specialized)         specialized ;;
+    summary)             show_summary ;;
     all)
-        stage1
-        stage2
-        stage3a
-        stage3b
-        stage4a
-        stage4b
-        stage5
-        stage6
-        stage7
+        align
+        generate_prefilter
+        filter_score
+        optimize
+        specialized
         show_summary
         ;;
     *)
-        echo "Usage: $0 [stage1|stage2|stage3a|stage3b|stage4a|stage4b|stage5|stage6|stage7|summary|all]"
+        echo "Usage: $0 [align|generate_prefilter|filter_score|optimize|specialized|summary|all]"
         echo ""
-        echo "  stage1  — alignment (mafft, clustalo)"
-        echo "  stage2  — generate 20,000 raw primers (primer3_core)"
-        echo "  stage3a — pre-filter by Tm+structure → ~2,000 good primers (primer3-py)"
-        echo "  stage3b — thermodynamics on filtered (MELTING, oligo-melting)"
-        echo "  stage4a — specificity on filtered (BLAST, MFEprimer, primerdiffer)"
-        echo "  stage4b — in-silico PCR on top 100 pairs (isPcr, ipcress, primersearch, tntblast)"
-        echo "  stage5  — tiling schemes (PS3, varvamp, olivar)"
-        echo "  stage6  — taxon-specific + multiplex (PUPpy, NGS-PrimerPlex)"
-        echo "  stage7  — other generators (DegePrime, primer3-py multi-genome)"
+        echo "  align               — MAFFT, Clustal Omega"
+        echo "  generate_prefilter  — primer3_core, primer3-py filter, DegePrime, primer3-py multi"
+        echo "  filter_score        — MELTING, oligo-melting, BLAST, MFEprimer, seqkit, bowtie2, isPcr, ipcress, primersearch, tntblast"
+        echo "  optimize            — olivar, NGS-PrimerPlex"
+        echo "  specialized         — PrimalScheme3, varvamp, PUPpy, PrimerServer2, primerdiffer"
         ;;
 esac
